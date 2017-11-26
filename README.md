@@ -8,7 +8,7 @@
 
 >  You can use the included delegate API without ever changing a line of code within the hub. Simply implement the delegate protocol functions into your project.
 >
->        protocol P2PHubDelegate: NSObjectProtocol {
+>       protocol P2PHubDelegate: NSObjectProtocol {
 >           func p2pDataRecieved(data: String, hub: P2PHub, connection: inout P2PConnection)
 >           func p2pServerFound(serverName: String, hub: P2PHub)
 >           func p2pServerLost(serverName: String, hub: P2PHub)
@@ -18,10 +18,10 @@
 >
 > Once this is done, you can spawn a new instance of P2PHub and send/receive messages.
 >
->         let myHub: P2PHub = P2PHub(serverName: "12345", type: "_project._tcp.")
+>       let myHub: P2PHub = P2PHub(serverName: "12345", type: "_project._tcp.")
 >       myHub.delegate = self
 >       
->         func p2pPeerConnected(hub: P2PHub, connection: inout P2PConnection) {
+>       func p2pPeerConnected(hub: P2PHub, connection: inout P2PConnection) {
 >           hub.send(message: "Hello, World!", connection: &connection)
 >       }
 
