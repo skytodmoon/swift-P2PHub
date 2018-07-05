@@ -29,19 +29,23 @@ protocol P2PHubDelegate: NSObjectProtocol {
     func p2pPeerDisconnected(hub: P2PHub, connection: inout P2PConnection)
 }
 
-public class P2PConnection {
+public class P2PConnection: NSObject {
     var inputStream: InputStream?
     var outputStream: OutputStream?
     var streamOpenCount: Int = 0
     var hasSpaceAvailable: Bool = false
     var connected: Bool = false
-    init(input_stream: InputStream, output_stream: OutputStream) {
+    var ID: String?
+    init(input_stream: InputStream, output_stream: OutputStream, ident: String) {
         inputStream = input_stream
         outputStream = output_stream
+        ID = ident
     }
-    init() {
+    override init() {
+        super.init()
         inputStream = nil
         outputStream = nil
+        ID = ""
     }
 }
 
@@ -57,18 +61,23 @@ public class P2PHub: NSObject, NetServiceDelegate, StreamDelegate, NetServiceBro
     private var browser: NetServiceBrowser?
     private var initiator: Bool?
     
-    private var p2pConnections: [P2PConnection] = []
+    public var p2pConnections: [P2PConnection] = []
+    public var numConnections: Int = 0
+    private var idxInUse: Int = -1
     
     private var overflowInputStreams: [InputStream] = []
     private var overflowOutputStreams: [OutputStream] = []
     
+    private var server_type: String = ""
     
     init(serverName: String, type: String) {
         super.init()
-        self.server = NetService(domain: "local.", type:  type, name: serverName, port: 0)
+        self.server_type = type
         
+        self.server = NetService(domain: "local.", type:  type, name: serverName, port: 0)
         self.server!.includesPeerToPeer = true
         self.server!.delegate = self
+        
         self.isServerStarted = false
         //self.streamOpenCount = 0
         //self.streamHasSpaceAvailable = true
@@ -79,6 +88,7 @@ public class P2PHub: NSObject, NetServiceDelegate, StreamDelegate, NetServiceBro
     
     public func startServer() {
         assert(!self.isServerStarted!)
+        
         self.server!.publish(options: .listenForConnections)
         self.server!.delegate = self
         self.isServerStarted = true
@@ -102,6 +112,20 @@ public class P2PHub: NSObject, NetServiceDelegate, StreamDelegate, NetServiceBro
         self.startServer()
     }
     
+    public func renameServer(name: String) {
+        var was = false
+        if self.isServerStarted! {
+            self.stopServer()
+            was = true
+        }
+        self.server = NetService(domain: "local.", type:  self.server_type, name: name, port: 0)
+        self.server!.includesPeerToPeer = true
+        self.server!.delegate = self
+        if was {
+            self.startServer()
+        }
+    }
+    
     public func netServiceDidPublish(_ sender: NetService) {
         assert(sender == self.server)
         self.registeredName = self.server!.name
@@ -111,7 +135,9 @@ public class P2PHub: NSObject, NetServiceDelegate, StreamDelegate, NetServiceBro
         OperationQueue.main.addOperation({
             assert(sender == self.server)
             print ("connection from client recieved")
-            self.p2pConnections.append(P2PConnection(input_stream: inputStream, output_stream: outputStream))
+            let timest = arc4random_uniform(100000)
+            self.p2pConnections.append(P2PConnection(input_stream: inputStream, output_stream: outputStream, ident: String(timest)))
+            self.numConnections = self.p2pConnections.count
             self.openStreams(connection: &self.p2pConnections[self.p2pConnections.count-1])
         })
     }
@@ -137,7 +163,7 @@ public class P2PHub: NSObject, NetServiceDelegate, StreamDelegate, NetServiceBro
         self.browser = NetServiceBrowser()
         self.browser!.includesPeerToPeer = true
         self.browser!.delegate = self
-        self.browser!.searchForServices(ofType: "_present._tcp.", inDomain: "local")
+        self.browser!.searchForServices(ofType: self.server_type, inDomain: "local")
     }
     
     public func stopBrowser() {
@@ -180,9 +206,11 @@ public class P2PHub: NSObject, NetServiceDelegate, StreamDelegate, NetServiceBro
         if let thisChar: Character = char {
             charArray.append(thisChar)
         }
-        if counter == 32 {
-            print("message recieved: \(String(charArray))")
-            self.delegate?.p2pDataRecieved(data: String(charArray), hub: self, connection: &connection)
+        if counter == 128 {
+            var mess = String(charArray)
+            mess = mess.replacingOccurrences(of: "\0", with: "", options: NSString.CompareOptions.literal, range: nil)
+            print("message recieved: \(mess)")
+            self.delegate?.p2pDataRecieved(data: mess, hub: self, connection: &connection)
             charArray = []
             counter = 0
         }
@@ -196,11 +224,13 @@ public class P2PHub: NSObject, NetServiceDelegate, StreamDelegate, NetServiceBro
         for i: Int in 0...p2pConnections.count-1 {
             if aStream == p2pConnections[i].inputStream {
                 connectionIdx = i
+                self.idxInUse = i
                 foundConnection = true
                 break
             }
             if aStream == p2pConnections[i].outputStream {
                 connectionIdx = i
+                self.idxInUse = i
                 foundConnection = true
                 break
             }
@@ -265,7 +295,7 @@ public class P2PHub: NSObject, NetServiceDelegate, StreamDelegate, NetServiceBro
                 //print(bytesRead)
                 //print(b)
                 if self.delegate != nil {
-                    self.bufferMessage(char: b.pointee.char, connection: &p2pConnections[connectionIdx])
+                    self.bufferMessage(char: uint8char(input: b.pointee), connection: &p2pConnections[connectionIdx])
                 }
                 // parse byte data as needed (assign each sudent a class-local ID upon registration)
             }
@@ -280,6 +310,7 @@ public class P2PHub: NSObject, NetServiceDelegate, StreamDelegate, NetServiceBro
         default:
             assert(false)
         }
+        self.idxInUse = -1
     }
     
     func openStreams(connection: inout P2PConnection) {
@@ -310,7 +341,7 @@ public class P2PHub: NSObject, NetServiceDelegate, StreamDelegate, NetServiceBro
         connection.streamOpenCount = 0
     }
     
-    public func send(message: String, connection: inout P2PConnection) -> Bool {
+    public func send(message: String, connection: inout P2PConnection) throws -> Bool {
         print("sending message: \(message)")
         //assert(self.streamOpenCount == 2)
         var byteArray: [UInt8] = []
@@ -319,11 +350,11 @@ public class P2PHub: NSObject, NetServiceDelegate, StreamDelegate, NetServiceBro
             let scalars = characterString.unicodeScalars
             
             byteArray.append(UInt8(scalars[scalars.startIndex].value))
-            if byteArray.count == 32 {
+            if byteArray.count == 128 {
                 break;
             }
         }
-        while byteArray.count < 32 {
+        while byteArray.count < 128 {
             byteArray.append(UInt8(0))
         }
         
@@ -338,7 +369,7 @@ public class P2PHub: NSObject, NetServiceDelegate, StreamDelegate, NetServiceBro
             if (connection.hasSpaceAvailable) {
                 let count = 1
                 var pointer = UnsafeMutablePointer<UInt8>.allocate(capacity: count)
-                pointer.initialize(to: 0, count: count)
+                pointer.initialize(repeating: 0, count: count)
                 defer {
                     pointer.deinitialize(count: count)
                     pointer.deallocate(capacity: count)
@@ -356,11 +387,24 @@ public class P2PHub: NSObject, NetServiceDelegate, StreamDelegate, NetServiceBro
         return true
     }
     
+    func broadcast(message: String) {
+        let intArray: [Int] = Array(0...self.numConnections-1)
+        for i in intArray {
+            do {
+                if i != self.idxInUse {
+                    try self.send(message: message, connection: &self.p2pConnections[i])
+                }
+            } catch {
+                print("didn't send to p\(i)")
+            }
+        }
+    }
+    
     func initiateConnection(service: NetService) {
         var success: Bool
         
         p2pConnections.append(P2PConnection())
-        
+        self.numConnections = self.p2pConnections.count
         success = service.getInputStream(&p2pConnections[p2pConnections.count-1].inputStream, outputStream: &p2pConnections[p2pConnections.count-1].outputStream)
         if (!success) {
             self.restartServer()
@@ -375,11 +419,15 @@ public class P2PHub: NSObject, NetServiceDelegate, StreamDelegate, NetServiceBro
         connection.connected = false
         self.closeStream(connection: &connection)
     }
+    
+    func uint8char(input: UInt8) -> Character {
+        return Character(UnicodeScalar(input))
+    }
 }
 
-extension UInt8 {
+/*extension UInt8 {
     var char: Character {
         return Character(UnicodeScalar(self))
     }
-}
+}*/
 
